@@ -1,29 +1,29 @@
 {
     "Test 1": {
         "input": 0,
-        "excpected": "i0e"
+        "expected": "i0e"
     },
     "Test 2": {
         "input": -42,
-        "excpected": "i-42e"
+        "expected": "i-42e"
     },
     "Test 3": {
         "input": "hello",
-        "excpected": "5:hello"
+        "expected": "5:hello"
     },
     "Test 4": {
         "input": "",
-        "excpected": "0:"
+        "expected": "0:"
     },
     "Test 5": {
         "input": [
             "spam"
         ],
-        "excpected": "l4:spame"
+        "expected": "l4:spame"
     },
     "Test 6": {
         "input": [],
-        "excpected": "le"
+        "expected": "le"
     },
     "Test 7": {
         "input": [
@@ -31,7 +31,7 @@
             "bb",
             "ccc"
         ],
-        "excpected": "l1:a2:bb3:ccce"
+        "expected": "l1:a2:bb3:ccce"
     },
     "Test 8": {
         "input": [
@@ -39,24 +39,24 @@
             2,
             3
         ],
-        "excpected": "li1ei2ei3ee"
+        "expected": "li1ei2ei3ee"
     },
     "Test 9": {
         "input": {},
-        "excpected": "de"
+        "expected": "de"
     },
     "Test 10": {
         "input": {
             "foo": "bar"
         },
-        "excpected": "d3:foo3:bare"
+        "expected": "d3:foo3:bare"
     },
     "Test 11": {
         "input": {
             "a": 1,
             "b": 2
         },
-        "excpected": "d1:ai1e1:bi2ee"
+        "expected": "d1:ai1e1:bi2ee"
     },
     "Test 12": {
         "input": {
@@ -64,7 +64,7 @@
             "age": 30,
             "active": 1
         },
-        "excpected": "d6:activei1e3:agei30e4:name5:Alicee"
+        "expected": "d6:activei1e3:agei30e4:name5:Alicee"
     },
     "Test 13": {
         "input": [
@@ -75,7 +75,7 @@
                 "b"
             ]
         ],
-        "excpected": "l5:helloi42el1:a1:bee"
+        "expected": "l5:helloi42el1:a1:bee"
     },
     "Test 14": {
         "input": {
@@ -86,7 +86,7 @@
             ],
             "name": "test"
         },
-        "excpected": "d4:name4:test7:numbersli1ei2ei3eee"
+        "expected": "d4:name4:test7:numbersli1ei2ei3eee"
     },
     "Test 15": {
         "input": {
@@ -99,7 +99,7 @@
                 20
             ]
         },
-        "excpected": "d6:scoresli10ei20ee4:userd3:agei25e4:name3:Bobee"
+        "expected": "d6:scoresli10ei20ee4:userd3:agei25e4:name3:Bobee"
     },
     "Test 16": {
         "input": [
@@ -108,6 +108,6 @@
             "",
             0
         ],
-        "excpected": "llede0:i0ee"
+        "expected": "llede0:i0ee"
     }
 }

@@ -1,0 +1,34 @@
+{
+    "Test 1": {
+        "input_file": "debian-13.7.0-amd64-netinst.iso.torrent",
+        "expected_type": "dict",
+        "expected_keys": [
+            "announce",
+            "comment",
+            "created by",
+            "creation date",
+            "info",
+            "url-list"
+        ],
+        "expected_info_keys": [
+            "length",
+            "name",
+            "piece length",
+            "pieces"
+        ],
+        "expected_name": "debian-13.7.0-amd64-netinst.iso",
+        "expected_length": 792723456,
+        "expected_piece_length": 262144,
+        "expected_pieces_length": 60480,
+        "expected_piece_count": 3024,
+        "expected_pieces_sha1": "6488b24a0567ce38cb1457d3dbd6c4795ef81349",
+        "expected_announce": "http://bttracker.debian.org:6969/announce",
+        "expected_comment": "Debian CD from cdimage.debian.org",
+        "expected_created_by": "mktorrent 1.1",
+        "expected_creation_date": 1789212731,
+        "expected_url_list": [
+            "https://cdimage.debian.org/cdimage/release/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso",
+            "https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso"
+        ]
+    }
+}
