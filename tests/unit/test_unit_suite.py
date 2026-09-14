@@ -72,7 +72,8 @@ class TestTorrentMetainfo(unittest.TestCase):
         self.client = torrent.TorrentClient()
 
     def tearDown(self):
-        self.client.socket_conn.close()
+        if self.client.socket_conn is not None:
+            self.client.socket_conn.close()
         self.socket_patcher.stop()
 
     def test_missing_file_raises_file_not_found_error(self):
@@ -118,7 +119,8 @@ class TestTrackerUnits(unittest.TestCase):
         self.client = torrent.TorrentClient()
 
     def tearDown(self):
-        self.client.socket_conn.close()
+        if self.client.socket_conn is not None:
+            self.client.socket_conn.close()
         self.socket_patcher.stop()
 
     def test_build_get_request_contains_complete_tracker_parameters(self):
@@ -182,20 +184,18 @@ class TestInteractiveClient(unittest.TestCase):
         self.shell = client.BitTorrentShell(stdout=self.output)
 
     def test_scan_caches_peers_and_peers_lists_them(self):
-        scanner = Mock()
-        scanner.contact_peers_from_torrent.return_value = [
+        self.shell.client = Mock()
+        self.shell.client.contact_peers_from_torrent.return_value = [
             ("127.0.0.1", 6881),
             ("10.0.0.2", 51413),
         ]
         with (
             patch("client.validate_torrent_path", return_value=Path("sample.torrent")),
-            patch("client.torrent.TorrentClient", return_value=scanner),
         ):
             self.shell.onecmd("scan sample.torrent")
         self.shell.onecmd("peers")
 
-        scanner.contact_peers_from_torrent.assert_called_once_with("sample.torrent")
-        scanner.disconnect.assert_called_once_with()
+        self.shell.client.contact_peers_from_torrent.assert_called_once_with("sample.torrent")
         self.assertEqual(self.shell.peers, [("127.0.0.1", 6881), ("10.0.0.2", 51413)])
         self.assertEqual(
             self.output.getvalue(),
@@ -207,23 +207,87 @@ class TestInteractiveClient(unittest.TestCase):
             "2  10.0.0.2   51413\n",
         )
 
-    def test_connect_accepts_a_cached_peer_number(self):
-        peer_client = Mock()
-        self.shell.peers = [("10.0.0.2", 51413)]
-        with patch("client.torrent.TorrentClient", return_value=peer_client):
-            self.shell.onecmd("connect 1")
+    def test_scan_and_connect_share_one_client_instance(self):
+        shared_client = Mock()
+        shared_client.contact_peers_from_torrent.return_value = [("10.0.0.2", 51413)]
+        output = StringIO()
+        with (
+            patch("client.torrent.TorrentClient", return_value=shared_client) as client_factory,
+            patch("client.validate_torrent_path", return_value=Path("sample.torrent")),
+        ):
+            shell = client.BitTorrentShell(stdout=output)
+            shell.onecmd("scan sample.torrent")
+            shell.onecmd("connect 1")
+            shared_client.recv_msg.return_value = None
+            shell.onecmd("handshake")
 
-        peer_client.connect_to_peer.assert_called_once_with("10.0.0.2", 51413, debug=False)
-        self.assertIs(self.shell.connection, peer_client)
+        client_factory.assert_called_once_with()
+        shared_client.contact_peers_from_torrent.assert_called_once_with("sample.torrent")
+        shared_client.connect_to_peer.assert_called_once_with("10.0.0.2", 51413, debug=False)
+        shared_client.send_handshake.assert_called_once_with()
+        shared_client.verify_info.assert_called_once()
+
+    def test_connect_accepts_a_cached_peer_number(self):
+        self.shell.client = Mock()
+        self.shell.client.recv_msg.return_value = None
+        self.shell.peers = [("10.0.0.2", 51413)]
+        self.shell.torrent_file = Path("sample.torrent")
+        self.shell.onecmd("connect 1")
+        self.shell.onecmd("handshake")
+
+        self.shell.client.connect_to_peer.assert_called_once_with("10.0.0.2", 51413, debug=False)
+        self.shell.client.send_handshake.assert_called_once_with()
+        self.shell.client.verify_info.assert_called_once()
+        self.assertIs(self.shell.connection, self.shell.client)
         self.assertEqual(self.shell.connected_peer, ("10.0.0.2", 51413))
         self.assertEqual(
             self.output.getvalue(),
-            "Connecting to 10.0.0.2:51413...\nConnected to 10.0.0.2:51413.\n",
+            "Connecting to 10.0.0.2:51413...\nConnected to 10.0.0.2:51413.\n"
+            "Establishing BitTorrent handshake...\nHandshake complete.\n",
         )
 
     def test_connect_rejects_an_invalid_port_before_opening_a_socket(self):
-        with patch("client.torrent.TorrentClient") as torrent_client:
-            self.shell.onecmd("connect example.com 70000")
+        self.shell.client = Mock()
+        self.shell.onecmd("connect example.com 70000")
 
-        torrent_client.assert_not_called()
+        self.shell.client.connect_to_peer.assert_not_called()
         self.assertEqual(self.output.getvalue(), "Port must be between 1 and 65535.\n")
+
+    def test_send_and_receive_messages_after_handshake(self):
+        self.shell.client = Mock()
+        self.shell.connection = self.shell.client
+        self.shell.connection.socket_conn = Mock()
+        self.shell.handshake_complete = True
+        self.shell.client.recv_msg.return_value = (4, b"\x00\x00\x00\x07")
+
+        self.shell.onecmd("send interested")
+        self.shell.onecmd("receive")
+
+        self.shell.connection.socket_conn.sendall.assert_called_once_with(b"\x00\x00\x00\x01\x02")
+        self.shell.client.recv_msg.assert_called_once_with()
+        self.assertEqual(self.output.getvalue(), "Sent interested.\nReceived have: 7\n")
+
+    def test_peer_messages_require_a_successful_handshake(self):
+        self.shell.client = Mock()
+        self.shell.connection = self.shell.client
+
+        self.shell.onecmd("send interested")
+        self.shell.onecmd("receive")
+
+        self.shell.client.recv_msg.assert_not_called()
+        self.assertEqual(
+            self.output.getvalue(),
+            "Handshake is required. Use 'handshake' first.\n"
+            "Handshake is required. Use 'handshake' first.\n",
+        )
+
+    def test_send_keepalive_writes_an_empty_peer_wire_frame(self):
+        self.shell.client = Mock()
+        self.shell.connection = self.shell.client
+        self.shell.connection.socket_conn = Mock()
+        self.shell.handshake_complete = True
+
+        self.shell.onecmd("send keepalive")
+
+        self.shell.connection.socket_conn.sendall.assert_called_once_with(b"\x00\x00\x00\x00")
+        self.assertEqual(self.output.getvalue(), "Sent keep-alive.\n")

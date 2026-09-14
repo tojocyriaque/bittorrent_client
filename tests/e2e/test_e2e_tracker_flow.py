@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
 from pathlib import Path
+import socket
 import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -49,7 +50,8 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
                         case["expected_pieces_sha1"],
                     )
         finally:
-            torrent_client.socket_conn.close()
+            if torrent_client.socket_conn is not None:
+                torrent_client.socket_conn.close()
 
     def test_contact_peers_from_torrent_uses_local_tracker_and_returns_peers(self):
         compact_peers = b"\x7f\x00\x00\x01\x1a\xe1\xc0\xa8\x01\x05\xcb\xd5"
@@ -109,4 +111,92 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
             "-  -----------  -----\n"
             "1  127.0.0.1    6881\n"
             "2  192.168.1.5  52181\n",
+        )
+
+    def test_shell_exchanges_peer_wire_messages_with_a_local_peer(self):
+        received_frames = []
+        peer_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        peer_listener.bind(("127.0.0.1", 0))
+        peer_listener.listen(1)
+        peer_host, peer_port = peer_listener.getsockname()
+
+        def receive_exact(connection, size):
+            data = b""
+            while len(data) < size:
+                chunk = connection.recv(size - len(data))
+                if not chunk:
+                    raise ConnectionError("Client closed the connection")
+                data += chunk
+            return data
+
+        def serve_peer():
+            try:
+                connection, _ = peer_listener.accept()
+                with connection:
+                    handshake = receive_exact(connection, 68)
+                    info_hash = handshake[28:48]
+                    peer_id = b"-TEST00-local-peer-1"
+                    connection.sendall(
+                        b"\x13BitTorrent protocol" + b"\x00" * 8 + info_hash + peer_id
+                    )
+                    length = int.from_bytes(receive_exact(connection, 4), byteorder="big")
+                    received_frames.append(receive_exact(connection, length))
+                    connection.sendall(b"\x00\x00\x00\x05\x04\x00\x00\x00\x07")
+            finally:
+                peer_listener.close()
+
+        peer_thread = Thread(target=serve_peer, daemon=True)
+        peer_thread.start()
+        compact_peer = socket.inet_aton(peer_host) + peer_port.to_bytes(2, byteorder="big")
+
+        class LocalTracker(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"d5:peers6:" + compact_peer + b"e"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        tracker = ThreadingHTTPServer(("127.0.0.1", 0), LocalTracker)
+        tracker_thread = Thread(target=tracker.serve_forever, daemon=True)
+        tracker_thread.start()
+        try:
+            announce_url = f"http://127.0.0.1:{tracker.server_port}/announce".encode()
+            metainfo = {
+                b"announce": announce_url,
+                b"info": {b"length": 1, b"name": b"sample.bin", b"piece length": 1, b"pieces": b""},
+            }
+            with TemporaryDirectory() as temporary_directory:
+                torrent_path = Path(temporary_directory) / "sample.torrent"
+                torrent_path.write_bytes(bencoding.bencode_data(metainfo))
+                output = StringIO()
+                shell = client.BitTorrentShell(stdout=output)
+                with patch("torrent.os.urandom", return_value=b"abcdefghijkl"):
+                    shell.onecmd(f"scan {torrent_path}")
+                shell.onecmd("connect 1")
+                shell.onecmd("handshake")
+                shell.onecmd("send interested")
+                shell.onecmd("receive")
+                shell.onecmd("disconnect")
+        finally:
+            tracker.shutdown()
+            tracker.server_close()
+            tracker_thread.join()
+            peer_thread.join()
+
+        self.assertEqual(received_frames, [b"\x02"])
+        self.assertEqual(
+            output.getvalue(),
+            "Scan complete: 1 peer(s) found.\n"
+            "Use 'peers' to list them or 'connect <number>'.\n"
+            f"Connecting to {peer_host}:{peer_port}...\n"
+            f"Connected to {peer_host}:{peer_port}.\n"
+            "Establishing BitTorrent handshake...\n"
+            "Handshake complete.\n"
+            "Sent interested.\n"
+            "Received have: 7\n"
+            "Peer disconnected.\n",
         )
