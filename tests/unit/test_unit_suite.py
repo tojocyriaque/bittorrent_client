@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 from urllib.parse import unquote_to_bytes, urlsplit
 
 
@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import bencoding
+import client
 import torrent
 
 
@@ -65,12 +66,21 @@ class TestBencoding(unittest.TestCase):
 
 
 class TestTorrentMetainfo(unittest.TestCase):
+    def setUp(self):
+        self.socket_patcher = patch("torrent.socket.socket")
+        self.socket_patcher.start()
+        self.client = torrent.TorrentClient()
+
+    def tearDown(self):
+        self.client.socket_conn.close()
+        self.socket_patcher.stop()
+
     def test_missing_file_raises_file_not_found_error(self):
         with (
             patch("builtins.open", side_effect=FileNotFoundError),
             self.assertRaises(FileNotFoundError),
         ):
-            torrent.get_torrent_metainfo("missing-file.torrent")
+            self.client.get_torrent_metainfo("missing-file.torrent")
 
     def test_reads_bytes_and_returns_decoded_dictionary(self):
         encoded = b"d4:infodee"
@@ -79,7 +89,7 @@ class TestTorrentMetainfo(unittest.TestCase):
             patch("builtins.open", mock_open(read_data=encoded)) as open_file,
             patch("torrent.bencoding.bdecode_bytes", return_value=(decoded, len(encoded))) as decode,
         ):
-            self.assertIs(torrent.get_torrent_metainfo("fixture.torrent"), decoded)
+            self.assertIs(self.client.get_torrent_metainfo("fixture.torrent"), decoded)
         open_file.assert_called_once_with("fixture.torrent", "rb")
         decode.assert_called_once_with(encoded)
 
@@ -102,9 +112,18 @@ class TestTrackerUnits(unittest.TestCase):
         parsed = urlsplit(request_url)
         return parsed, {key: unquote_to_bytes(value) for key, value in (item.split("=", 1) for item in parsed.query.split("&"))}
 
+    def setUp(self):
+        self.socket_patcher = patch("torrent.socket.socket")
+        self.socket_patcher.start()
+        self.client = torrent.TorrentClient()
+
+    def tearDown(self):
+        self.client.socket_conn.close()
+        self.socket_patcher.stop()
+
     def test_build_get_request_contains_complete_tracker_parameters(self):
         with patch("torrent.os.urandom", return_value=b"abcdefghijkl") as random_bytes:
-            request_url = torrent.build_get_request(self.metainfo)
+            request_url = self.client.build_get_request(self.metainfo)
         parsed, parameters = self.query_parameters(request_url)
         random_bytes.assert_called_once_with(12)
         self.assertEqual((parsed.scheme, parsed.netloc, parsed.path), ("http", "bttracker.debian.org:6969", "/announce"))
@@ -121,29 +140,90 @@ class TestTrackerUnits(unittest.TestCase):
         mock_get.return_value.content = b"d8:intervali1800e5:peers12:" + compact_peers + b"e"
         output = StringIO()
         with redirect_stdout(output):
-            response = torrent.contact_peers(request_url)
+            response = self.client.contact_peers(request_url)
         mock_get.assert_called_once_with(request_url)
         self.assertEqual(response, {b"interval": 1800, b"peers": compact_peers})
         self.assertEqual(output.getvalue(), f"Contacting peers...\nrequest: {request_url}\n")
 
-    def test_get_peers_from_response_decodes_all_hosts_and_ports(self):
-        response = {b"peers": b"\x7f\x00\x00\x01\x1a\xe1\xc0\xa8\x01\x05\xcb\xd5"}
-        self.assertEqual(torrent.get_peers_from_response(response), [("127.0.0.1", 6881), ("192.168.1.5", 52181)])
-
-    def test_get_peers_from_response_handles_no_peers(self):
-        self.assertEqual(torrent.get_peers_from_response({b"peers": b""}), [])
-
-    @patch("torrent.get_peers_from_response", return_value=[("10.0.0.2", 51413)])
-    @patch("torrent.contact_peers", return_value={b"peers": b"ignored"})
-    @patch("torrent.build_get_request", return_value="http://tracker.example/announce")
-    @patch("torrent.get_torrent_metainfo", return_value={b"info": {}})
-    def test_contact_peers_from_torrent_orchestrates_dependencies(self, metainfo, request, contact, peers):
+    def test_contact_peers_from_torrent_orchestrates_dependencies_and_returns_peers(
+        self,
+    ):
+        self.client.get_torrent_metainfo = Mock(return_value={b"info": {}})
+        self.client.build_get_request = Mock(return_value="http://tracker.example/announce")
+        self.client.contact_peers = Mock(return_value={b"peers": b"\x0a\x00\x00\x02\xc8\xd5"})
         output = StringIO()
         with redirect_stdout(output):
-            result = torrent.contact_peers_from_torrent("example.torrent")
-        metainfo.assert_called_once_with("example.torrent")
-        request.assert_called_once_with(metainfo.return_value)
-        contact.assert_called_once_with(request.return_value)
-        peers.assert_called_once_with(contact.return_value)
-        self.assertIsNone(result)
-        self.assertEqual(output.getvalue(), "peers:\nPeer 0 : Host 10.0.0.2 Port 51413\n")
+            result = self.client.contact_peers_from_torrent("example.torrent")
+        self.client.get_torrent_metainfo.assert_called_once_with("example.torrent")
+        self.client.build_get_request.assert_called_once_with(
+            self.client.get_torrent_metainfo.return_value
+        )
+        self.client.contact_peers.assert_called_once_with(self.client.build_get_request.return_value)
+        self.assertEqual(result, [("10.0.0.2", 51413)])
+        self.assertEqual(output.getvalue(), "")
+
+    def test_contact_peers_from_torrent_prints_peers_only_in_debug_mode(
+        self,
+    ):
+        self.client.get_torrent_metainfo = Mock(return_value={b"info": {}})
+        self.client.build_get_request = Mock(return_value="http://tracker.example/announce")
+        self.client.contact_peers = Mock(return_value={b"peers": b"\x0a\x00\x00\x02\xc8\xd5"})
+        output = StringIO()
+        with redirect_stdout(output):
+            result = self.client.contact_peers_from_torrent("example.torrent", debug=True)
+
+        self.assertEqual(result, [("10.0.0.2", 51413)])
+        self.assertEqual(output.getvalue(), "peers:\nPeer 0: Host 10.0.0.2 Port 51413\n")
+
+
+class TestInteractiveClient(unittest.TestCase):
+    def setUp(self):
+        self.output = StringIO()
+        self.shell = client.BitTorrentShell(stdout=self.output)
+
+    def test_scan_caches_peers_and_peers_lists_them(self):
+        scanner = Mock()
+        scanner.contact_peers_from_torrent.return_value = [
+            ("127.0.0.1", 6881),
+            ("10.0.0.2", 51413),
+        ]
+        with (
+            patch("client.validate_torrent_path", return_value=Path("sample.torrent")),
+            patch("client.torrent.TorrentClient", return_value=scanner),
+        ):
+            self.shell.onecmd("scan sample.torrent")
+        self.shell.onecmd("peers")
+
+        scanner.contact_peers_from_torrent.assert_called_once_with("sample.torrent")
+        scanner.disconnect.assert_called_once_with()
+        self.assertEqual(self.shell.peers, [("127.0.0.1", 6881), ("10.0.0.2", 51413)])
+        self.assertEqual(
+            self.output.getvalue(),
+            "Scan complete: 2 peer(s) found.\n"
+            "Use 'peers' to list them or 'connect <number>'.\n"
+            "#  HOST       PORT\n"
+            "-  ---------  -----\n"
+            "1  127.0.0.1  6881\n"
+            "2  10.0.0.2   51413\n",
+        )
+
+    def test_connect_accepts_a_cached_peer_number(self):
+        peer_client = Mock()
+        self.shell.peers = [("10.0.0.2", 51413)]
+        with patch("client.torrent.TorrentClient", return_value=peer_client):
+            self.shell.onecmd("connect 1")
+
+        peer_client.connect_to_peer.assert_called_once_with("10.0.0.2", 51413, debug=False)
+        self.assertIs(self.shell.connection, peer_client)
+        self.assertEqual(self.shell.connected_peer, ("10.0.0.2", 51413))
+        self.assertEqual(
+            self.output.getvalue(),
+            "Connecting to 10.0.0.2:51413...\nConnected to 10.0.0.2:51413.\n",
+        )
+
+    def test_connect_rejects_an_invalid_port_before_opening_a_socket(self):
+        with patch("client.torrent.TorrentClient") as torrent_client:
+            self.shell.onecmd("connect example.com 70000")
+
+        torrent_client.assert_not_called()
+        self.assertEqual(self.output.getvalue(), "Port must be between 1 and 65535.\n")
