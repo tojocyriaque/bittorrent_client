@@ -284,7 +284,7 @@ class BitTorrentShell(cmd.Cmd):
 
         msg_id, payload = message
         try:
-            decoded = self._decode_peer_payload(msg_id, payload)
+            decoded = self.connection.decode_payload(msg_id, payload)
         except ValueError as error:
             self.stdout.write(f"Invalid peer message: {error}\n")
             return
@@ -311,7 +311,12 @@ class BitTorrentShell(cmd.Cmd):
 
         try:
             with self._ctrl_s_cancellation():
-                self._send_peer_message(msg_id, payload)
+                if msg_id is None:
+                    if self.connection.socket_conn is None:
+                        raise ConnectionError("No peer is connected")
+                    self.connection.socket_conn.sendall(b"\x00\x00\x00\x00")
+                else:
+                    self.connection.send_msg(msg_id, payload)
         except KeyboardInterrupt:
             self._disconnect_current()
             self.stdout.write("Send cancelled.\n")
@@ -380,58 +385,6 @@ class BitTorrentShell(cmd.Cmd):
         if not 0 <= number <= 0xFFFFFFFF:
             raise ValueError(f"{label.capitalize()} must be between 0 and 4294967295.")
         return number
-
-    def _send_peer_message(self, msg_id: int | None, message) -> None:
-        if self.connection is None or self.connection.socket_conn is None:
-            raise ConnectionError("No peer is connected")
-        if msg_id is None:
-            self.connection.socket_conn.sendall(b"\x00\x00\x00\x00")
-            return
-
-        payload = self._encode_peer_payload(msg_id, message)
-        frame = (len(payload) + 1).to_bytes(4, byteorder="big") + bytes([msg_id]) + payload
-        self.connection.socket_conn.sendall(frame)
-
-    @staticmethod
-    def _encode_peer_payload(msg_id: int, message) -> bytes:
-        if msg_id in {0, 1, 2, 3}:
-            return b""
-        if msg_id == 4:
-            return message.to_bytes(4, byteorder="big")
-        if msg_id == 5:
-            return message
-        if msg_id in {6, 8}:
-            return b"".join(value.to_bytes(4, byteorder="big") for value in message)
-        if msg_id == 7:
-            index, begin, block = message
-            return index.to_bytes(4, byteorder="big") + begin.to_bytes(4, byteorder="big") + block
-        raise ValueError(f"Unknown message ID: {msg_id}")
-
-    @staticmethod
-    def _decode_peer_payload(msg_id: int, payload: bytes):
-        if msg_id in {0, 1, 2, 3}:
-            if payload:
-                raise ValueError("Message must not have a payload")
-            return None
-        if msg_id == 4:
-            if len(payload) != 4:
-                raise ValueError("Invalid have payload")
-            return int.from_bytes(payload, byteorder="big")
-        if msg_id == 5:
-            return [[int(byte & (1 << bit) != 0) for bit in range(7, -1, -1)] for byte in payload]
-        if msg_id in {6, 8}:
-            if len(payload) != 12:
-                raise ValueError("Invalid request or cancel payload")
-            return tuple(int.from_bytes(payload[index : index + 4], byteorder="big") for index in range(0, 12, 4))
-        if msg_id == 7:
-            if len(payload) < 8:
-                raise ValueError("Invalid piece payload")
-            return (
-                int.from_bytes(payload[:4], byteorder="big"),
-                int.from_bytes(payload[4:8], byteorder="big"),
-                payload[8:],
-            )
-        raise ValueError(f"Unknown message ID: {msg_id}")
 
     def _connection_target(self, arguments: list[str]) -> tuple[str, int]:
         if len(arguments) == 1:

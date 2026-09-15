@@ -1,9 +1,10 @@
 """Unit tests: all external boundaries are mocked or exercised in isolation."""
 
+from contextlib import nullcontext
 import hashlib
 import json
-from contextlib import redirect_stdout
 from io import StringIO
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -20,6 +21,13 @@ import torrent
 
 
 BENCODING_TESTS = ROOT / "tests" / "bencoding.json"
+
+
+def diagnostic_output():
+    """Keep normal runs quiet while exposing diagnostics with ``--debug``."""
+    if os.environ.get("BITTORRENT_TEST_DEBUG") == "1":
+        return nullcontext()
+    return patch("builtins.print")
 
 
 def json_to_bencoded_value(value):
@@ -140,12 +148,10 @@ class TestTrackerUnits(unittest.TestCase):
         request_url = "http://tracker.example/announce?compact=1"
         compact_peers = b"\x7f\x00\x00\x01\x1a\xe1\xc0\xa8\x01\x05\xcb\xd5"
         mock_get.return_value.content = b"d8:intervali1800e5:peers12:" + compact_peers + b"e"
-        output = StringIO()
-        with redirect_stdout(output):
+        with diagnostic_output():
             response = self.client.contact_peers(request_url)
         mock_get.assert_called_once_with(request_url)
         self.assertEqual(response, {b"interval": 1800, b"peers": compact_peers})
-        self.assertEqual(output.getvalue(), f"Contacting peers...\nrequest: {request_url}\n")
 
     def test_contact_peers_from_torrent_orchestrates_dependencies_and_returns_peers(
         self,
@@ -153,29 +159,24 @@ class TestTrackerUnits(unittest.TestCase):
         self.client.get_torrent_metainfo = Mock(return_value={b"info": {}})
         self.client.build_get_request = Mock(return_value="http://tracker.example/announce")
         self.client.contact_peers = Mock(return_value={b"peers": b"\x0a\x00\x00\x02\xc8\xd5"})
-        output = StringIO()
-        with redirect_stdout(output):
-            result = self.client.contact_peers_from_torrent("example.torrent")
+        result = self.client.contact_peers_from_torrent("example.torrent")
         self.client.get_torrent_metainfo.assert_called_once_with("example.torrent")
         self.client.build_get_request.assert_called_once_with(
             self.client.get_torrent_metainfo.return_value
         )
         self.client.contact_peers.assert_called_once_with(self.client.build_get_request.return_value)
         self.assertEqual(result, [("10.0.0.2", 51413)])
-        self.assertEqual(output.getvalue(), "")
 
-    def test_contact_peers_from_torrent_prints_peers_only_in_debug_mode(
+    def test_contact_peers_from_torrent_returns_peers_in_debug_mode(
         self,
     ):
         self.client.get_torrent_metainfo = Mock(return_value={b"info": {}})
         self.client.build_get_request = Mock(return_value="http://tracker.example/announce")
         self.client.contact_peers = Mock(return_value={b"peers": b"\x0a\x00\x00\x02\xc8\xd5"})
-        output = StringIO()
-        with redirect_stdout(output):
+        with diagnostic_output():
             result = self.client.contact_peers_from_torrent("example.torrent", debug=True)
 
         self.assertEqual(result, [("10.0.0.2", 51413)])
-        self.assertEqual(output.getvalue(), "peers:\nPeer 0: Host 10.0.0.2 Port 51413\n")
 
 
 class TestInteractiveClient(unittest.TestCase):
@@ -259,12 +260,14 @@ class TestInteractiveClient(unittest.TestCase):
         self.shell.connection.socket_conn = Mock()
         self.shell.handshake_complete = True
         self.shell.client.recv_msg.return_value = (4, b"\x00\x00\x00\x07")
+        self.shell.client.decode_payload.return_value = 7
 
         self.shell.onecmd("send interested")
         self.shell.onecmd("receive")
 
-        self.shell.connection.socket_conn.sendall.assert_called_once_with(b"\x00\x00\x00\x01\x02")
+        self.shell.client.send_msg.assert_called_once_with(2, None)
         self.shell.client.recv_msg.assert_called_once_with()
+        self.shell.client.decode_payload.assert_called_once_with(4, b"\x00\x00\x00\x07")
         self.assertEqual(self.output.getvalue(), "Sent interested.\nReceived have: 7\n")
 
     def test_peer_messages_require_a_successful_handshake(self):

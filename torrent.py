@@ -1,3 +1,4 @@
+from sys import byteorder
 from ftplib import MSG_OOB
 from enum import Enum
 import socket
@@ -64,13 +65,14 @@ class TorrentClient:
 
         return get_request
 
-    def contact_peers(self, req: str) -> dict:
+    def contact_peers(self, req: str, debug = False) -> dict:
         res = requests.get(req)
 
         obj, _ = bencoding.bdecode_bytes(res.content)
 
-        print("Contacting peers...")
-        print("request:", req)
+        if debug:
+            print("Contacting peers...")
+            print("request:", req)
 
         return obj
 
@@ -176,22 +178,15 @@ class TorrentClient:
             "peer id": handshake[48:68],
         }
 
-    def verify_info(self, handshake:dict):
+    def verify_info(self, handshake:dict, debug = False):
 
         if handshake["info hash"] != self.info_hash:
             raise ValueError("Peer has a different info hash")
 
-        print("Info hashes match !!")
+        if debug:
+            print("Info hashes match !!")
 
     # === PEER WIRE MESSAGES ===
-    """
-    message length     4 bytes
-    message ID         1 byte
-    payload            N bytes
-    """
-    def send_msg(self):
-        pass
-
     """
     0 - choke
     1 - unchoke
@@ -236,7 +231,7 @@ class TorrentClient:
 
                 return index, begin, payload[8:]
 
-            case 0,1,2,3: # choke, unchoke, interested, not interested
+            case 0|1|2|3: # choke, unchoke, interested, not interested
                 if payload:
                     raise ValueError("Message must not have a payload")
 
@@ -290,7 +285,7 @@ class TorrentClient:
                     block
                 ])
 
-            case 0,1,2,3: # choke, unchoke, interested, not interested
+            case 0 | 1 | 2 | 3: # choke, unchoke, interested, not interested
                 if msg:
                     raise ValueError("Message must not have a message")
 
@@ -299,12 +294,17 @@ class TorrentClient:
             case _: # choke, unchoke, interested, not interested
                 raise ValueError(f"Unknown message ID {msg_id}")
 
+    """
+    message length     4 bytes
+    message ID         1 byte
+    payload            N bytes
+    """
     def send_msg(self, msg_id:int, msg):
         block = self.encode_msg(msg_id, msg)
         length = len(block) + 1
 
         payload = b"".join([
-            int.to_bytes(4, length, byteorder='big'),
+            length.to_bytes(4, byteorder='big'),
             bytes([msg_id]),
             block
         ])

@@ -1,10 +1,11 @@
 """End-to-end test: torrent file -> local HTTP tracker -> displayed peers."""
 
-from contextlib import redirect_stdout
+from contextlib import nullcontext
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -21,6 +22,19 @@ sys.path.insert(0, str(ROOT))
 import bencoding
 import client
 import torrent
+
+
+def debug(message: str) -> None:
+    """Show integration-test milestones only when ``tests.py --debug`` is used."""
+    if os.environ.get("BITTORRENT_TEST_DEBUG") == "1":
+        print(f"       [e2e] {message}", flush=True)
+
+
+def diagnostic_output():
+    """Keep normal runs quiet while exposing diagnostics with ``--debug``."""
+    if os.environ.get("BITTORRENT_TEST_DEBUG") == "1":
+        return nullcontext()
+    return patch("builtins.print")
 
 
 class TestTrackerFlowEndToEnd(unittest.TestCase):
@@ -80,9 +94,8 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
                 torrent_path = Path(temporary_directory) / "sample.torrent"
                 torrent_path.write_bytes(bencoding.bencode_data(metainfo))
                 shell_output = StringIO()
-                tracker_output = StringIO()
                 shell = client.BitTorrentShell(stdout=shell_output)
-                with patch("torrent.os.urandom", return_value=b"abcdefghijkl"), redirect_stdout(tracker_output):
+                with patch("torrent.os.urandom", return_value=b"abcdefghijkl"), diagnostic_output():
                     shell.onecmd(f"scan {torrent_path}")
                 shell.onecmd("peers")
         finally:
@@ -94,15 +107,9 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
         self.assertEqual(len(received_paths), 1)
         parsed = urlsplit(received_paths[0])
         parameters = {key: unquote_to_bytes(value) for key, value in (item.split("=", 1) for item in parsed.query.split("&"))}
-        request_url = f"http://127.0.0.1:{server.server_port}{received_paths[0]}"
         self.assertEqual(parsed.path, "/announce")
         self.assertEqual(parameters["peer_id"], b"-PY0001-abcdefghijkl")
         self.assertEqual(parameters["left"], b"123")
-        self.assertEqual(
-            tracker_output.getvalue(),
-            "Contacting peers...\n"
-            f"request: {request_url}\n",
-        )
         self.assertEqual(
             shell_output.getvalue(),
             "Scan complete: 2 peer(s) found.\n"
@@ -119,6 +126,7 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
         peer_listener.bind(("127.0.0.1", 0))
         peer_listener.listen(1)
         peer_host, peer_port = peer_listener.getsockname()
+        debug(f"peer listening on {peer_host}:{peer_port}")
 
         def receive_exact(connection, size):
             data = b""
@@ -131,17 +139,22 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
 
         def serve_peer():
             try:
+                debug("peer waiting for the shell connection")
                 connection, _ = peer_listener.accept()
                 with connection:
+                    debug("peer accepted TCP connection; waiting for handshake")
                     handshake = receive_exact(connection, 68)
                     info_hash = handshake[28:48]
                     peer_id = b"-TEST00-local-peer-1"
                     connection.sendall(
                         b"\x13BitTorrent protocol" + b"\x00" * 8 + info_hash + peer_id
                     )
+                    debug("peer returned handshake; waiting for one peer-wire message")
                     length = int.from_bytes(receive_exact(connection, 4), byteorder="big")
                     received_frames.append(receive_exact(connection, length))
+                    debug(f"peer received message: {received_frames[-1]!r}")
                     connection.sendall(b"\x00\x00\x00\x05\x04\x00\x00\x00\x07")
+                    debug("peer sent 'have 7'")
             finally:
                 peer_listener.close()
 
@@ -163,6 +176,7 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
         tracker = ThreadingHTTPServer(("127.0.0.1", 0), LocalTracker)
         tracker_thread = Thread(target=tracker.serve_forever, daemon=True)
         tracker_thread.start()
+        debug(f"tracker listening on 127.0.0.1:{tracker.server_port}")
         try:
             announce_url = f"http://127.0.0.1:{tracker.server_port}/announce".encode()
             metainfo = {
@@ -175,10 +189,15 @@ class TestTrackerFlowEndToEnd(unittest.TestCase):
                 output = StringIO()
                 shell = client.BitTorrentShell(stdout=output)
                 with patch("torrent.os.urandom", return_value=b"abcdefghijkl"):
+                    debug("shell scans torrent through local tracker")
                     shell.onecmd(f"scan {torrent_path}")
+                debug("shell connects to the peer")
                 shell.onecmd("connect 1")
+                debug("shell performs handshake")
                 shell.onecmd("handshake")
+                debug("shell sends 'interested'")
                 shell.onecmd("send interested")
+                debug("shell waits for the peer response")
                 shell.onecmd("receive")
                 shell.onecmd("disconnect")
         finally:
